@@ -1,0 +1,39 @@
+The difference between using MCP to get the space of disk and using terminal is not obvious
+1. terminal can get the result by running df -h
+the terminal inside the container do:
+eg. What filesystem is this container's / stored on, and how much space does that filesystem have?
+The container is stored on the VPS disk, so when Hermes runs df -h inside the container, it may see a filesystem
+whose total size is the same as the VPS filesystem.
+2. the MCP make hermes call function directly to get result:
+But!!! same logic!: call function is just like do df -h in terminal, so the location of MCP server determines where you are calling the function.
+Eg:
+Hermes on Hetzner
+↓ internet
+MCP Server on Tencent Cloud
+then we get the result of the space of Tencent Cloud
+
+So! if we wanna do operation on the host, but our hermes inside the container(isolated by the container)
+We can let hermes use the (MCP on the host), with the aim of calling function on host. So that our hermes can do
+the operation (only the function was defined by us!) on host. In this way, the hermes is under control, although
+it was injected by hacker.
+
+3: the way how hermes inside container connects MCP sever:
+Hetzner VPS
+│
+├── Host Linux
+│   └── MCP Server
+│       └── listening on port 8000
+│
+└── Docker
+    └── Hermes
+         │
+         └──── HTTP ────► Host MCP Server
+Therefore: Hermes just needs an address that reaches the mcp, eg(http://host.docker.internal:8000/mcp)
+
+On Linux servers, host.docker.internal may need to be added when we start the container:
+docker run \
+  --add-host=host.docker.internal:host-gateway \
+  ...
+
+Thinking!: we can use MCP achieve container connect with host. What if we connect hermes with our OneNote by http?
+what if we connect hermes with our CoinMarketCap, with limited function(allowance).
