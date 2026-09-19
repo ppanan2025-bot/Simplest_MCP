@@ -141,8 +141,8 @@ def list_hub_files(path: str = "", recursive: bool = False) -> dict:
 def get_file_metadata(path: str) -> dict:
     """Return size, type, and timestamps for one knowledge-hub path.
 
-    Use this before read_hub_file to check whether a file is supported text
-    and under 2 MB. Path must stay inside the hub root after symlink
+    Use this before read_hub_file to check whether a file is readable text
+    or a PDF under 2 MB. Path must stay inside the hub root after symlink
     resolution. This tool does not read file contents.
     """
     return knowledge_hub.get_file_metadata(path)
@@ -160,25 +160,26 @@ def get_latest_files(limit: int = 10) -> dict:
 
 @mcp.tool()
 def read_hub_file(path: str) -> dict:
-    """Read one UTF-8 text file from the knowledge hub.
+    """Read one UTF-8 text file or extract text from a PDF in the knowledge hub.
 
-    Use this after list_hub_files or search_hub when Hermes needs the actual
-    notes. Only supported text formats are allowed (md, txt, json, csv, yml,
-    yaml, rst, log, py, html, xml, tex, toml, ini). Files larger than 2 MB
-    are rejected. PDFs, databases, and binary files cannot be read. Paths
-    outside the hub root are denied. This tool never writes.
+    Use this after list_hub_files or search_hub when Hermes needs lecture or
+    note content. Supported sources: text formats (md, txt, json, csv, yml,
+    yaml, rst, log, py, html, xml, tex, toml, ini) and PDFs. Files larger
+    than 2 MB are rejected. PDF bytes are never returned; only extracted
+    text. Scanned image-only PDFs return EMPTY_PDF. Paths outside the hub
+    root are denied. This tool never writes.
     """
     return knowledge_hub.read_hub_file(path)
 
 
 @mcp.tool()
 def search_hub(query: str) -> dict:
-    """Search knowledge-hub text files for a query string.
+    """Search knowledge-hub text files and PDF text for a query string.
 
-    Use this when the user asks which notes mention a topic. It scans
-    supported text files only, skips files over 2 MB, and returns a limited
-    set of path + line snippets. It does not search PDFs or run a shell.
-    Query must be 2 to 200 characters.
+    Use this when the user asks which notes or lecture PDFs mention a topic.
+    It scans supported text files and extractable PDFs, skips files over
+    2 MB, and returns a limited set of path + line snippets. It does not
+    run a shell. Query must be 2 to 200 characters.
     """
     return knowledge_hub.search_hub(query)
 

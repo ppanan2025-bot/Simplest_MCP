@@ -21,6 +21,9 @@ MAX_SEARCH_SNIPPETS = 3
 MAX_SEARCH_SCAN_FILES = 400
 MAX_QUERY_LENGTH = 200
 MIN_QUERY_LENGTH = 2
+MAX_PDF_PAGES = 40
+MAX_EXTRACTED_CHARS = 100_000
+PDF_EXTENSION = ".pdf"
 
 TEXT_EXTENSIONS = frozenset(
     {
@@ -92,6 +95,69 @@ def _inside_root(path: Path) -> bool:
 
 def _is_supported_text(path: Path) -> bool:
     return path.suffix.lower() in TEXT_EXTENSIONS
+
+
+def _is_pdf(path: Path) -> bool:
+    return path.suffix.lower() == PDF_EXTENSION
+
+
+def _is_readable_source(path: Path) -> bool:
+    return _is_supported_text(path) or _is_pdf(path)
+
+
+def _extract_pdf_text(path: Path) -> tuple[str, int]:
+    """Return extracted text and page count. Read-only; no shell."""
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+    except ImportError as exc:
+        raise RuntimeError("pypdf is not installed") from exc
+
+    try:
+        reader = PdfReader(str(path))
+    except (OSError, PdfReadError, ValueError) as exc:
+        raise ValueError(f"Could not open PDF: {exc}") from exc
+
+    parts: list[str] = []
+    page_count = 0
+    for index, page in enumerate(reader.pages[:MAX_PDF_PAGES], start=1):
+        page_count = index
+        text = (page.extract_text() or "").strip()
+        if not text:
+            continue
+        parts.append(f"[Page {index}]\n{text}")
+    combined = "\n\n".join(parts).strip()
+    if len(combined) > MAX_EXTRACTED_CHARS:
+        combined = combined[:MAX_EXTRACTED_CHARS]
+    return combined, page_count
+
+
+def _read_source_text(path: Path) -> dict:
+    if _is_pdf(path):
+        try:
+            content, page_count = _extract_pdf_text(path)
+        except RuntimeError as exc:
+            return _error("EXTRACTOR_UNAVAILABLE", str(exc))
+        except ValueError as exc:
+            return _error("UNSUPPORTED_TYPE", str(exc))
+        if not content:
+            return _error(
+                "EMPTY_PDF",
+                "PDF has no extractable text. It may be scanned images only.",
+            )
+        return {
+            "ok": True,
+            "encoding": "pdf-text",
+            "content": content,
+            "page_count": page_count,
+        }
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return _error("UNSUPPORTED_TYPE", "File is not valid UTF-8 text")
+    except OSError as exc:
+        return _error("NOT_FOUND", str(exc))
+    return {"ok": True, "encoding": "utf-8", "content": content}
 
 
 def _entry_payload(path: Path) -> dict | None:
@@ -210,7 +276,10 @@ def get_file_metadata(path: str) -> dict:
         "modified_at": _iso(st.st_mtime),
         "suffix": target.suffix.lower(),
         "is_text": kind == "file" and _is_supported_text(target),
-        "readable": kind == "file" and _is_supported_text(target) and st.st_size <= MAX_READ_BYTES,
+        "is_pdf": kind == "file" and _is_pdf(target),
+        "readable": kind == "file"
+        and _is_readable_source(target)
+        and st.st_size <= MAX_READ_BYTES,
         "symlink": target.is_symlink(),
     }
 
@@ -267,30 +336,31 @@ def read_hub_file(path: str) -> dict:
         return _error("NOT_FOUND", "Path not found inside the knowledge hub")
     if not target.is_file():
         return _error("UNSUPPORTED_TYPE", "Path is not a file")
-    if not _is_supported_text(target):
+    if not _is_readable_source(target):
         return _error(
             "UNSUPPORTED_TYPE",
-            f"Only text formats can be read: {', '.join(sorted(TEXT_EXTENSIONS))}",
+            "Only text files and PDFs can be read "
+            f"({', '.join(sorted(TEXT_EXTENSIONS | {PDF_EXTENSION}))})",
         )
 
     size = target.stat().st_size
     if size > MAX_READ_BYTES:
         return _error("TOO_LARGE", "File is larger than 2 MB and cannot be read")
 
-    try:
-        content = target.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return _error("UNSUPPORTED_TYPE", "File is not valid UTF-8 text")
-    except OSError as exc:
-        return _error("NOT_FOUND", str(exc))
+    loaded = _read_source_text(target)
+    if not loaded.get("ok"):
+        return loaded
 
-    return {
+    result = {
         "ok": True,
         "path": _rel(target),
         "size_bytes": size,
-        "encoding": "utf-8",
-        "content": content,
+        "encoding": loaded["encoding"],
+        "content": loaded["content"],
     }
+    if "page_count" in loaded:
+        result["page_count"] = loaded["page_count"]
+    return result
 
 
 def search_hub(query: str) -> dict:
@@ -316,7 +386,7 @@ def search_hub(query: str) -> dict:
         ]
         for name in filenames:
             path = current / name
-            if not _inside_root(path) or not path.is_file() or not _is_supported_text(path):
+            if not _inside_root(path) or not path.is_file() or not _is_readable_source(path):
                 continue
             try:
                 size = path.stat().st_size
@@ -332,10 +402,10 @@ def search_hub(query: str) -> dict:
                     "truncated": True,
                     "matches": matches,
                 }
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            loaded = _read_source_text(path)
+            if not loaded.get("ok"):
                 continue
+            text = loaded["content"]
             snippets: list[dict] = []
             for index, line in enumerate(text.splitlines(), start=1):
                 if lowered in line.lower():
@@ -348,13 +418,14 @@ def search_hub(query: str) -> dict:
                     if len(snippets) >= MAX_SEARCH_SNIPPETS:
                         break
             if snippets:
-                matches.append(
-                    {
-                        "path": _rel(path.resolve()),
-                        "name": path.name,
-                        "snippets": snippets,
-                    }
-                )
+                match = {
+                    "path": _rel(path.resolve()),
+                    "name": path.name,
+                    "snippets": snippets,
+                }
+                if loaded.get("encoding") == "pdf-text":
+                    match["source"] = "pdf"
+                matches.append(match)
             if len(matches) >= MAX_SEARCH_RESULTS:
                 return {
                     "ok": True,

@@ -17,8 +17,8 @@ Knowledge hub (root: `/opt/knowledge-hub/data`):
 - `list_hub_files(path="", recursive=False)` — list hub files. Read-only.
 - `get_file_metadata(path)` — size, type, timestamps. No file body.
 - `get_latest_files(limit=10)` — newest files by mtime. Metadata only.
-- `read_hub_file(path)` — UTF-8 text files only, max 2 MB.
-- `search_hub(query)` — substring search over text files, limited results.
+- `read_hub_file(path)` — UTF-8 text or extracted PDF text, max 2 MB.
+- `search_hub(query)` — substring search over text files and PDF text, limited results.
 
 The hub helpers live in `knowledge_hub.py`. The reusable framework is documented in the `knowledge_MCP` repo. Hermes usage notes live in `knowledge_hub_skill`.
 
@@ -48,5 +48,5 @@ python server.py
 - No sudo, no writes, no delete, no rename, no chmod
 - Workspace tools stay inside `/home/hermes/workspace`
 - Hub tools stay inside `/opt/knowledge-hub/data` after resolving symlinks
-- `read_hub_file` rejects non-text formats and files larger than 2 MB
+- `read_hub_file` rejects files larger than 2 MB; PDFs return extracted text only, never bytes
 - Do not put tokens, SSH keys, or `.env` files in this repo
