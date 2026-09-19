@@ -2,12 +2,25 @@
 
 check your serve disk without terminal using
 
-Read-only Python MCP server for a Hermes host on Hetzner. It reports disk and memory usage and lists file names inside `/home/hermes/workspace`. It does not run shell commands and does not need sudo.
+Read-only Python MCP server for a Hermes host on Hetzner. It reports disk and memory usage, lists workspace file names, and exposes a jailed knowledge-hub reader. It does not run shell commands and does not need sudo.
 
 ## Tools
 
+Host status (workspace jail: `/home/hermes/workspace`):
+
 - `get_server_status()` — disk total / used / free, plus memory usage. Read-only.
-- `list_project_files(path)` — file names only, jailed to `/home/hermes/workspace`. Path traversal is rejected.
+- `get_disk_usage()` — disk total / used / free only.
+- `list_project_files(path)` — file names only, jailed to `/home/hermes/workspace`.
+
+Knowledge hub (root: `/opt/knowledge-hub/data`):
+
+- `list_hub_files(path="", recursive=False)` — list hub files. Read-only.
+- `get_file_metadata(path)` — size, type, timestamps. No file body.
+- `get_latest_files(limit=10)` — newest files by mtime. Metadata only.
+- `read_hub_file(path)` — UTF-8 text files only, max 2 MB.
+- `search_hub(query)` — substring search over text files, limited results.
+
+The hub helpers live in `knowledge_hub.py`. The reusable framework is documented in the `knowledge_MCP` repo. Hermes usage notes live in `knowledge_hub_skill`.
 
 ## Requirements
 
@@ -25,30 +38,15 @@ pip install -r requirements.txt
 
 ## Run
 
-Stdio (typical Hermes / MCP host launch):
-
 ```bash
 python server.py
-```
-
-## Hermes config example
-
-Point Hermes at this server with stdio. Adjust the Python and script paths to match the Hetzner host:
-
-```json
-{
-  "mcpServers": {
-    "simplest-mcp": {
-      "command": "/home/hermes/workspace/Simplest_MCP/.venv/bin/python",
-      "args": ["/home/hermes/workspace/Simplest_MCP/server.py"]
-    }
-  }
-}
 ```
 
 ## Security
 
 - No shell execution, no arbitrary commands
-- No sudo
-- `list_project_files` resolves paths and allows only `/home/hermes/workspace` and below
+- No sudo, no writes, no delete, no rename, no chmod
+- Workspace tools stay inside `/home/hermes/workspace`
+- Hub tools stay inside `/opt/knowledge-hub/data` after resolving symlinks
+- `read_hub_file` rejects non-text formats and files larger than 2 MB
 - Do not put tokens, SSH keys, or `.env` files in this repo

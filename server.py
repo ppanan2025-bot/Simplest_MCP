@@ -12,6 +12,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+import knowledge_hub
+
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
 DISK_PATH = "/"
 SERVER_DIR = Path(__file__).resolve().parent
@@ -121,6 +123,64 @@ def list_project_files(path: str = ".") -> dict:
         names = sorted(entry.name for entry in target.iterdir())
 
     return {"files": names}
+
+
+@mcp.tool()
+def list_hub_files(path: str = "", recursive: bool = False) -> dict:
+    """List knowledge-hub files under KNOWLEDGE_HUB_ROOT only.
+
+    Use this first when Hermes needs to see which units, lectures, or notes
+    exist in the local knowledge hub. Path is relative to the hub root.
+    Set recursive=True to walk subfolders. This tool is read-only: it never
+    writes, deletes, or runs a shell. It skips symlinks that escape the hub.
+    """
+    return knowledge_hub.list_hub_files(path, recursive)
+
+
+@mcp.tool()
+def get_file_metadata(path: str) -> dict:
+    """Return size, type, and timestamps for one knowledge-hub path.
+
+    Use this before read_hub_file to check whether a file is supported text
+    and under 2 MB. Path must stay inside the hub root after symlink
+    resolution. This tool does not read file contents.
+    """
+    return knowledge_hub.get_file_metadata(path)
+
+
+@mcp.tool()
+def get_latest_files(limit: int = 10) -> dict:
+    """Return the most recently modified files in the knowledge hub.
+
+    Use this when the user asks what was added or updated lately. Limit is
+    clamped to 50. Results are metadata only (no file bodies). Read-only.
+    """
+    return knowledge_hub.get_latest_files(limit)
+
+
+@mcp.tool()
+def read_hub_file(path: str) -> dict:
+    """Read one UTF-8 text file from the knowledge hub.
+
+    Use this after list_hub_files or search_hub when Hermes needs the actual
+    notes. Only supported text formats are allowed (md, txt, json, csv, yml,
+    yaml, rst, log, py, html, xml, tex, toml, ini). Files larger than 2 MB
+    are rejected. PDFs, databases, and binary files cannot be read. Paths
+    outside the hub root are denied. This tool never writes.
+    """
+    return knowledge_hub.read_hub_file(path)
+
+
+@mcp.tool()
+def search_hub(query: str) -> dict:
+    """Search knowledge-hub text files for a query string.
+
+    Use this when the user asks which notes mention a topic. It scans
+    supported text files only, skips files over 2 MB, and returns a limited
+    set of path + line snippets. It does not search PDFs or run a shell.
+    Query must be 2 to 200 characters.
+    """
+    return knowledge_hub.search_hub(query)
 
 
 if __name__ == "__main__":
