@@ -1,72 +1,27 @@
 """Read-only MCP server for a Hermes host.
 
-Exposes disk/memory status and a jailed workspace file listing.
-Does not run shell commands and does not require sudo.
+Exposes host status, Docker inspection, a jailed workspace listing, and a
+jailed knowledge-hub reader. Does not run shell commands and does not require sudo.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 import knowledge_hub
+from monitoring import docker as docker_tools
+from monitoring import system as system_tools
 
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
-DISK_PATH = "/"
 SERVER_DIR = Path(__file__).resolve().parent
 
 # Stay in the server directory so FastMCP never reads another user's .env.
 os.chdir(SERVER_DIR)
 
 mcp = FastMCP("simplest-mcp")
-
-
-def _format_bytes(num_bytes: int) -> str:
-    value = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{num_bytes} B"
-
-
-def _read_memory() -> dict[str, int | float | str]:
-    meminfo = Path("/proc/meminfo")
-    if meminfo.is_file():
-        parsed: dict[str, int] = {}
-        for line in meminfo.read_text().splitlines():
-            if ":" not in line:
-                continue
-            key, raw_value = line.split(":", 1)
-            parts = raw_value.strip().split()
-            if not parts:
-                continue
-            parsed[key] = int(parts[0]) * 1024
-
-        total = parsed["MemTotal"]
-        available = parsed.get("MemAvailable", parsed.get("MemFree", 0))
-        used = max(total - available, 0)
-    else:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        total = os.sysconf("SC_PHYS_PAGES") * page_size
-        available = os.sysconf("SC_AVPHYS_PAGES") * page_size
-        used = max(total - available, 0)
-
-    percent_used = round((used / total) * 100, 2) if total else 0.0
-    return {
-        "total_bytes": total,
-        "used_bytes": used,
-        "available_bytes": available,
-        "percent_used": percent_used,
-        "total": _format_bytes(total),
-        "used": _format_bytes(used),
-        "available": _format_bytes(available),
-    }
 
 
 def _resolve_workspace_path(path: str) -> Path:
@@ -88,26 +43,73 @@ def _resolve_workspace_path(path: str) -> Path:
 
 @mcp.tool()
 def get_server_status() -> dict:
-    """Return disk total/used/free space and memory usage. Read-only."""
-    usage = shutil.disk_usage(DISK_PATH)
-    return {
-        "disk": {
-            "path": DISK_PATH,
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-            "free_bytes": usage.free,
-            "total": _format_bytes(usage.total),
-            "used": _format_bytes(usage.used),
-            "free": _format_bytes(usage.free),
-        },
-        "memory": _read_memory(),
-    }
+    """Get a read-only overview of the host server, including CPU, memory, disk and Docker status.
+
+    Use this first when Hermes, running in Docker, needs a quick look at the
+    Hetzner host. It does not change the system.
+    """
+    return system_tools.get_host_overview(docker_tools.docker_summary())
+
+
+@mcp.tool()
+def get_cpu_usage() -> dict:
+    """Get read-only CPU information for the Hetzner host.
+
+    Use this when Hermes needs logical/physical CPU count, usage percent, or
+    load average. It does not run a shell.
+    """
+    return system_tools.get_cpu_usage()
+
+
+@mcp.tool()
+def get_memory_usage() -> dict:
+    """Get read-only memory usage for the Hetzner host.
+
+    Use this when Hermes needs total, used, and available memory. Values are
+    returned in bytes and as human-readable strings.
+    """
+    return system_tools.get_memory_usage()
 
 
 @mcp.tool()
 def get_disk_usage() -> dict:
-    """Return disk total, used, and free space. Read-only."""
-    return get_server_status()["disk"]
+    """Get read-only disk usage for the host root filesystem.
+
+    Use this when Hermes needs total, used, and free space. The path is fixed
+    to `/` and cannot be chosen by the model.
+    """
+    return system_tools.get_disk_usage()
+
+
+@mcp.tool()
+def list_containers() -> dict:
+    """List Docker containers visible to the host MCP process.
+
+    Use this to see running and stopped containers on the Hetzner host. This
+    is read-only: it cannot start, stop, restart, or remove containers.
+    """
+    return docker_tools.list_containers()
+
+
+@mcp.tool()
+def get_container_status(container_name: str) -> dict:
+    """Inspect one Docker container on the Hetzner host.
+
+    Use this when Hermes needs status, health, image, or ports for a named
+    container. The name is validated. This cannot exec into the container or
+    change its state. Environment variables and secrets are not returned.
+    """
+    return docker_tools.get_container_status(container_name)
+
+
+@mcp.tool()
+def get_container_logs(container_name: str, lines: int = 100) -> dict:
+    """Read recent logs from a specific Docker container. Use this when diagnosing why a container or service is failing.
+
+    Default is 100 lines; the maximum is 1000. The container name is validated.
+    This cannot exec into the container or pass extra Docker CLI flags.
+    """
+    return docker_tools.get_container_logs(container_name, lines)
 
 
 @mcp.tool()

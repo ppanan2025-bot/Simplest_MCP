@@ -8,9 +8,19 @@ Read-only Python MCP server for a Hermes host on Hetzner. It reports disk and me
 
 Host status (workspace jail: `/home/hermes/workspace`):
 
-- `get_server_status()` — disk total / used / free, plus memory usage. Read-only.
-- `get_disk_usage()` — disk total / used / free only.
+- `get_server_status()` — host overview: hostname, OS, uptime, CPU, memory, disk, Docker counts.
+- `get_cpu_usage()` — logical/physical CPUs, usage percent, load average.
+- `get_memory_usage()` — total / used / available memory.
+- `get_disk_usage()` — root filesystem (`/`) only. No caller-chosen paths.
 - `list_project_files(path)` — file names only, jailed to `/home/hermes/workspace`.
+
+Docker inspection (read-only, host MCP process):
+
+- `list_containers()` — running and stopped containers.
+- `get_container_status(container_name)` — one container; no env/secrets.
+- `get_container_logs(container_name, lines=100)` — recent logs, 1–1000 lines.
+
+These Docker tools do not start, stop, restart, remove, or exec.
 
 Knowledge hub (root: `/opt/knowledge-hub/data`):
 
@@ -46,6 +56,9 @@ python server.py
 
 - No shell execution, no arbitrary commands
 - No sudo, no writes, no delete, no rename, no chmod
+- `get_disk_usage` is fixed to `/`; it does not take a path from Hermes
+- Docker tools talk only to the host Docker API through hardcoded SDK calls
+- The MCP process runs as `hermes` and is not automatically added to the docker group
 - Workspace tools stay inside `/home/hermes/workspace`
 - Hub tools stay inside `/opt/knowledge-hub/data` after resolving symlinks
 - `read_hub_file` rejects files larger than 2 MB; PDFs return extracted text only, never bytes
