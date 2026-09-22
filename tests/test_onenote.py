@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import onenote
@@ -17,6 +18,23 @@ class OneNoteTests(unittest.TestCase):
             status = onenote.auth_status()
         self.assertFalse(status["ok"])
         self.assertEqual(status["code"], "AUTH_NOT_CONFIGURED")
+        self.assertNotIn("access_token", status)
+
+    def test_status_configured_without_token_skips_network(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "ONENOTE_CLIENT_ID": "11111111-1111-1111-1111-111111111111",
+                "ONENOTE_TENANT_ID": "consumers",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(onenote, "TOKEN_PATH", Path("/tmp/simplest-mcp-no-onenote-token")):
+                with mock.patch.object(onenote, "_app", side_effect=AssertionError("network")):
+                    status = onenote.auth_status()
+        self.assertTrue(status["ok"])
+        self.assertFalse(status["authenticated"])
+        self.assertEqual(status["tenant"], "consumers")
         self.assertNotIn("access_token", status)
 
     def test_invalid_ids_rejected(self) -> None:

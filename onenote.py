@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -13,9 +14,11 @@ from urllib.parse import quote
 import httpx
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-SCOPES = ["Notes.Read", "User.Read", "offline_access"]
+# MSAL adds openid/profile/offline_access itself; passing offline_access raises.
+SCOPES = ["Notes.Read", "User.Read"]
 ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}-]{1,512}$")
 MAX_PAGE_CHARS = 200_000
+HTTP_TIMEOUT_SECONDS = 10.0
 CONFIG_DIR = Path(os.environ.get("ONENOTE_CONFIG_DIR") or (Path.home() / ".config" / "simplest-mcp"))
 TOKEN_PATH = CONFIG_DIR / "onenote_token.bin"
 FLOW_PATH = CONFIG_DIR / "onenote_device_flow.json"
@@ -35,6 +38,32 @@ def _tenant() -> str:
 
 def _authority() -> str:
     return f"https://login.microsoftonline.com/{_tenant()}"
+
+
+def _force_ipv4() -> None:
+    """Avoid hanging IPv6 connects to login.microsoftonline.com on this host."""
+    if getattr(socket.getaddrinfo, "_simplest_mcp_ipv4", False):
+        return
+    original = socket.getaddrinfo
+
+    def ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return original(host, port, socket.AF_INET, type, proto, flags)
+
+    ipv4_only._simplest_mcp_ipv4 = True  # type: ignore[attr-defined]
+    socket.getaddrinfo = ipv4_only
+    try:
+        import urllib3.util.connection as urllib3_cn
+
+        urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+    except Exception:
+        pass
+
+
+_force_ipv4()
+
+
+def _graph_client() -> httpx.Client:
+    return httpx.Client(timeout=HTTP_TIMEOUT_SECONDS)
 
 
 def _validate_id(value: str, field: str) -> str | dict:
@@ -98,6 +127,8 @@ def _app(cache=None):
         client_id,
         authority=_authority(),
         token_cache=cache,
+        timeout=HTTP_TIMEOUT_SECONDS,
+        instance_discovery=False,
     )
 
 
@@ -114,8 +145,25 @@ def auth_status() -> dict:
             "code": "AUTH_NOT_CONFIGURED",
             "error": "ONENOTE_CLIENT_ID is not set. Register an Entra public-client app with Notes.Read, then set that env var on the MCP process. Do not commit the id to git.",
         }
-    app = _app()
-    accounts = _accounts(app)
+    if not TOKEN_PATH.is_file():
+        return {
+            "ok": True,
+            "authenticated": False,
+            "account_count": 0,
+            "tenant": _tenant(),
+        }
+    try:
+        app = _app()
+        accounts = _accounts(app)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "authenticated": False,
+            "account_count": 0,
+            "tenant": _tenant(),
+            "code": "AUTH_UNAVAILABLE",
+            "error": f"Could not reach Microsoft login: {exc}",
+        }
     return {
         "ok": True,
         "authenticated": bool(accounts),
@@ -145,66 +193,71 @@ def onenote_login() -> dict:
     if not client_id:
         return auth_status()
 
-    cache = _load_cache()
-    app = _app(cache)
-    accounts = app.get_accounts()
-    silent = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
-    if silent and "access_token" in silent:
-        _save_cache(cache)
-        return {"ok": True, "authenticated": True, "message": "Already signed in to OneNote."}
-
-    pending = None
-    if FLOW_PATH.is_file():
-        try:
-            pending = json.loads(FLOW_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            pending = None
-
-    if pending and pending.get("device_code"):
-        result = app.acquire_token_by_device_flow(
-            {**pending, "expires_at": time.time() + 25}
-        )
-        if result and "access_token" in result:
+    try:
+        cache = _load_cache()
+        app = _app(cache)
+        if app is None:
+            return auth_status()
+        accounts = app.get_accounts()
+        silent = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+        if silent and "access_token" in silent:
             _save_cache(cache)
-            try:
-                FLOW_PATH.unlink()
-            except OSError:
-                pass
-            return {
-                "ok": True,
-                "authenticated": True,
-                "message": "OneNote sign-in complete. You can list notebooks now.",
-            }
-        error = result.get("error") if isinstance(result, dict) else None
-        if error in {"authorization_pending", "slow_down"} or not result:
-            return {
-                "ok": True,
-                "authenticated": False,
-                "pending": True,
-                "verification_uri": pending.get("verification_uri") or "https://microsoft.com/devicelogin",
-                "user_code": pending.get("user_code"),
-                "message": "Still waiting. Open the URL, enter the code, then call onenote_login again.",
-            }
-        return _error(
-            "AUTH_FAILED",
-            result.get("error_description") or result.get("error") or "Device login failed",
-        )
+            return {"ok": True, "authenticated": True, "message": "Already signed in to OneNote."}
 
-    flow = app.initiate_device_flow(scopes=SCOPES)
-    if "user_code" not in flow:
-        return _error("AUTH_FAILED", "Could not start Microsoft device login")
-    _ensure_config_dir()
-    FLOW_PATH.write_text(json.dumps(flow), encoding="utf-8")
-    os.chmod(FLOW_PATH, 0o600)
-    return {
-        "ok": True,
-        "authenticated": False,
-        "pending": True,
-        "verification_uri": flow.get("verification_uri") or "https://microsoft.com/devicelogin",
-        "user_code": flow.get("user_code"),
-        "message": flow.get("message")
-        or "Open the URL, enter the user_code, then call onenote_login again.",
-    }
+        pending = None
+        if FLOW_PATH.is_file():
+            try:
+                pending = json.loads(FLOW_PATH.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pending = None
+
+        if pending and pending.get("device_code"):
+            result = app.acquire_token_by_device_flow(
+                {**pending, "expires_at": time.time() + 25}
+            )
+            if result and "access_token" in result:
+                _save_cache(cache)
+                try:
+                    FLOW_PATH.unlink()
+                except OSError:
+                    pass
+                return {
+                    "ok": True,
+                    "authenticated": True,
+                    "message": "OneNote sign-in complete. You can list notebooks now.",
+                }
+            error = result.get("error") if isinstance(result, dict) else None
+            if error in {"authorization_pending", "slow_down"} or not result:
+                return {
+                    "ok": True,
+                    "authenticated": False,
+                    "pending": True,
+                    "verification_uri": pending.get("verification_uri") or "https://microsoft.com/devicelogin",
+                    "user_code": pending.get("user_code"),
+                    "message": "Still waiting. Open the URL, enter the code, then call onenote_login again.",
+                }
+            return _error(
+                "AUTH_FAILED",
+                result.get("error_description") or result.get("error") or "Device login failed",
+            )
+
+        flow = app.initiate_device_flow(scopes=SCOPES)
+        if "user_code" not in flow:
+            return _error("AUTH_FAILED", "Could not start Microsoft device login")
+        _ensure_config_dir()
+        FLOW_PATH.write_text(json.dumps(flow), encoding="utf-8")
+        os.chmod(FLOW_PATH, 0o600)
+        return {
+            "ok": True,
+            "authenticated": False,
+            "pending": True,
+            "verification_uri": flow.get("verification_uri") or "https://microsoft.com/devicelogin",
+            "user_code": flow.get("user_code"),
+            "message": flow.get("message")
+            or "Open the URL, enter the user_code, then call onenote_login again.",
+        }
+    except Exception as exc:
+        return _error("AUTH_UNAVAILABLE", f"Could not reach Microsoft login: {exc}")
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -217,7 +270,8 @@ def _graph_get(path: str, token: str, params: dict | None = None, extra_headers:
         headers.update(extra_headers)
     url = f"{GRAPH_BASE}{path}"
     try:
-        response = httpx.get(url, headers=headers, params=params, timeout=30.0)
+        with _graph_client() as client:
+            response = client.get(url, headers=headers, params=params)
     except httpx.HTTPError as exc:
         return _error("GRAPH_UNAVAILABLE", f"Could not reach Microsoft Graph: {exc}")
     if response.status_code == 401:
