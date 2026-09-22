@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import time
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote
@@ -76,11 +77,33 @@ def _validate_id(value: str, field: str) -> str | dict:
 
 
 class _HTMLText(HTMLParser):
+    """Personal OneNote pages often store the note as images; Graph puts OCR in img alt."""
+
     def __init__(self) -> None:
         super().__init__()
         self.parts: list[str] = []
+        self.image_count = 0
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style"}:
+            self._skip_depth += 1
+            return
+        if tag != "img":
+            return
+        self.image_count += 1
+        ad = {key.lower(): (value or "") for key, value in attrs}
+        alt = unescape(" ".join((ad.get("alt") or "").split()))
+        if alt:
+            self.parts.append(alt)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self._skip_depth:
+            self._skip_depth -= 1
 
     def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
         text = " ".join(data.split())
         if text:
             self.parts.append(text)
@@ -406,13 +429,17 @@ def read_onenote_page(page_id: str) -> dict:
     if len(html) > MAX_PAGE_CHARS:
         html = html[:MAX_PAGE_CHARS]
     info = (meta.get("data") or {}) if isinstance(meta.get("data"), dict) else {}
+    parser = _HTMLText()
+    parser.feed(html)
+    parser.close()
     return {
         "ok": True,
         "id": checked,
         "title": info.get("title"),
         "created": info.get("createdDateTime"),
         "modified": info.get("lastModifiedDateTime"),
-        "text": html_to_text(html),
+        "text": "\n".join(parser.parts),
+        "image_count": parser.image_count,
         "html_truncated": len(content.get("html") or "") > MAX_PAGE_CHARS,
     }
 

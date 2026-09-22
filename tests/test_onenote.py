@@ -13,6 +13,17 @@ class OneNoteTests(unittest.TestCase):
         self.assertIn("Week 1", text)
         self.assertIn("Stacks are LIFO.", text)
 
+    def test_html_to_text_includes_image_alt(self) -> None:
+        html = (
+            '<html><head><title></title></head><body>'
+            '<img alt="The COALESCE () function returns the first value. SQL&#39;s NULLIF." />'
+            "</body></html>"
+        )
+        text = onenote.html_to_text(html)
+        self.assertIn("COALESCE", text)
+        self.assertIn("NULLIF", text)
+        self.assertIn("SQL's", text)
+
     def test_status_without_client_id(self) -> None:
         with mock.patch.dict("os.environ", {"ONENOTE_CLIENT_ID": ""}, clear=False):
             status = onenote.auth_status()
@@ -112,6 +123,7 @@ class OneNoteTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["title"], "Lecture")
         self.assertIn("Tiny Python", result["text"])
+        self.assertEqual(result["image_count"], 0)
         self.assertNotIn("SECRET-TOKEN", str(result))
 
 
