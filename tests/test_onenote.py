@@ -42,6 +42,25 @@ class OneNoteTests(unittest.TestCase):
         self.assertEqual(bad["code"], "INVALID_ID")
         bad_page = onenote.read_onenote_page("id; curl evil")
         self.assertEqual(bad_page["code"], "INVALID_ID")
+        spaced = onenote.list_onenote_sections("0-ABC!123 more")
+        self.assertEqual(spaced["code"], "INVALID_ID")
+
+    def test_personal_onenote_ids_are_accepted(self) -> None:
+        personal = "0-8A1E2FABC123DEF!123"
+        checked = onenote._validate_id(personal, "notebook_id")
+        self.assertEqual(checked, personal)
+        token = {"ok": True, "access_token": "SECRET-TOKEN"}
+        graph = {"ok": True, "data": {"value": []}}
+        with mock.patch.object(onenote, "_with_token", return_value=token):
+            with mock.patch.object(onenote, "_graph_get", return_value=graph) as graph_get:
+                result = onenote.list_onenote_sections(personal)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["notebook_id"], personal)
+        self.assertNotIn("SECRET-TOKEN", str(result))
+        path = graph_get.call_args[0][0]
+        self.assertIn("notebooks/", path)
+        self.assertNotIn("..", path)
+        self.assertNotIn(";", path)
 
     def test_search_query_too_short(self) -> None:
         result = onenote.search_onenote("a")

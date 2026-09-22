@@ -16,7 +16,9 @@ import httpx
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # MSAL adds openid/profile/offline_access itself; passing offline_access raises.
 SCOPES = ["Notes.Read", "User.Read"]
-ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}-]{1,512}$")
+# Personal (consumers) OneNote ids are OneDrive-style and include "!".
+# Keep blocking path/shell characters such as / ; space | &.
+ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}!%-]{1,1024}$")
 MAX_PAGE_CHARS = 200_000
 HTTP_TIMEOUT_SECONDS = 10.0
 CONFIG_DIR = Path(os.environ.get("ONENOTE_CONFIG_DIR") or (Path.home() / ".config" / "simplest-mcp"))
