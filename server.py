@@ -12,6 +12,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 import knowledge_hub
+import onenote
 from monitoring import docker as docker_tools
 from monitoring import system as system_tools
 
@@ -184,6 +185,73 @@ def search_hub(query: str) -> dict:
     run a shell. Query must be 2 to 200 characters.
     """
     return knowledge_hub.search_hub(query)
+
+
+@mcp.tool()
+def onenote_status() -> dict:
+    """Check whether the host MCP is signed in to Microsoft OneNote.
+
+    Use this before listing notebooks. It does not return tokens.
+    """
+    return onenote.auth_status()
+
+
+@mcp.tool()
+def onenote_login() -> dict:
+    """Start or continue Microsoft device-code login for OneNote.
+
+    Use this when OneNote tools return NOT_AUTHENTICATED. It returns a URL and
+    a user_code. Open the URL, enter the code, then call this tool again.
+    It never returns access tokens.
+    """
+    return onenote.onenote_login()
+
+
+@mcp.tool()
+def list_onenote_notebooks() -> dict:
+    """List OneNote notebooks for the signed-in Microsoft account.
+
+    Use this first when Hermes needs to find notes. Read-only.
+    """
+    return onenote.list_onenote_notebooks()
+
+
+@mcp.tool()
+def list_onenote_sections(notebook_id: str) -> dict:
+    """List sections in one OneNote notebook.
+
+    Use this after list_onenote_notebooks. notebook_id is validated. Read-only.
+    """
+    return onenote.list_onenote_sections(notebook_id)
+
+
+@mcp.tool()
+def list_onenote_pages(section_id: str) -> dict:
+    """List pages in one OneNote section.
+
+    Use this after list_onenote_sections. Read-only; does not return page bodies.
+    """
+    return onenote.list_onenote_pages(section_id)
+
+
+@mcp.tool()
+def read_onenote_page(page_id: str) -> dict:
+    """Read one OneNote page as plain text.
+
+    Use this when Hermes needs the contents of a note. HTML is converted to
+    text. Tokens, passwords, and raw auth headers are not returned.
+    """
+    return onenote.read_onenote_page(page_id)
+
+
+@mcp.tool()
+def search_onenote(query: str) -> dict:
+    """Search OneNote page titles for a query.
+
+    Use this when the user asks which notes mention a topic. Query is 2–200
+    characters. Read-only.
+    """
+    return onenote.search_onenote(query)
 
 
 if __name__ == "__main__":

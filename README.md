@@ -30,6 +30,18 @@ Knowledge hub (root: `/opt/knowledge-hub/data`):
 - `read_hub_file(path)` — UTF-8 text or extracted PDF text, max 2 MB.
 - `search_hub(query)` — substring search over text files and PDF text, limited results.
 
+OneNote (Microsoft Graph, read-only):
+
+- `onenote_status()` — whether the MCP process is signed in. No tokens returned.
+- `onenote_login()` — device-code login; returns a URL and user code, never the access token.
+- `list_onenote_notebooks()` — notebooks for the signed-in account.
+- `list_onenote_sections(notebook_id)` — sections in one notebook.
+- `list_onenote_pages(section_id)` — pages in one section.
+- `read_onenote_page(page_id)` — page body as plain text.
+- `search_onenote(query)` — find pages by title/search.
+
+Requires `ONENOTE_CLIENT_ID` on the MCP process (Entra public client with `Notes.Read`). Tokens are stored under `~/.config/simplest-mcp/` and are gitignored.
+
 The hub helpers live in `knowledge_hub.py`. The reusable framework is documented in the `knowledge_MCP` repo. Hermes usage notes live in `knowledge_hub_skill`.
 
 ## Requirements
@@ -63,3 +75,4 @@ python server.py
 - Hub tools stay inside `/opt/knowledge-hub/data` after resolving symlinks
 - `read_hub_file` rejects files larger than 2 MB; PDFs return extracted text only, never bytes
 - Do not put tokens, SSH keys, or `.env` files in this repo
+- OneNote tokens stay in `~/.config/simplest-mcp/` (mode 600), not in git

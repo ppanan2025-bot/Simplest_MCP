@@ -5,3 +5,5 @@ knowledge_hub_skill/
 __pycache__/
 *.pyc
 .env
+onenote_token.bin
+onenote_device_flow.json
