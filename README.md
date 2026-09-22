@@ -37,7 +37,7 @@ OneNote (Microsoft Graph, read-only):
 - `list_onenote_notebooks()` — notebooks for the signed-in account.
 - `list_onenote_sections(notebook_id)` — sections in one notebook.
 - `list_onenote_pages(section_id)` — pages in one section.
-- `read_onenote_page(page_id)` — page body as plain text.
+- `read_onenote_page(page_id)` — page body as text, plus handwriting/screenshot images for vision.
 - `search_onenote(query)` — find pages by title/search.
 
 Requires `ONENOTE_CLIENT_ID` on the MCP process (Entra public client with `Notes.Read`). Tokens are stored under `~/.config/simplest-mcp/` and are gitignored.

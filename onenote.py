@@ -10,7 +10,7 @@ import time
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -22,9 +22,20 @@ SCOPES = ["Notes.Read", "User.Read"]
 ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}!%-]{1,1024}$")
 MAX_PAGE_CHARS = 200_000
 HTTP_TIMEOUT_SECONDS = 10.0
+MAX_PAGE_IMAGES = 6
+MAX_IMAGE_BYTES = 2 * 1024 * 1024
+WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
+HERMES_WORKSPACE = "/workspace"
 CONFIG_DIR = Path(os.environ.get("ONENOTE_CONFIG_DIR") or (Path.home() / ".config" / "simplest-mcp"))
 TOKEN_PATH = CONFIG_DIR / "onenote_token.bin"
 FLOW_PATH = CONFIG_DIR / "onenote_device_flow.json"
+IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"RIFF", "webp"),
+)
 
 
 def _error(code: str, message: str) -> dict:
@@ -83,6 +94,7 @@ class _HTMLText(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
         self.image_count = 0
+        self.image_urls: list[str] = []
         self._skip_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -96,6 +108,17 @@ class _HTMLText(HTMLParser):
         alt = unescape(" ".join((ad.get("alt") or "").split()))
         if alt:
             self.parts.append(alt)
+        for key in ("data-fullres-src", "data-src", "src"):
+            url = (ad.get(key) or "").strip()
+            if url:
+                self.image_urls.append(url)
+                break
+        else:
+            resource_id = (ad.get("data-id") or "").strip()
+            if resource_id:
+                self.image_urls.append(
+                    f"{GRAPH_BASE}/me/onenote/resources/{quote(resource_id, safe='')}/content"
+                )
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style"} and self._skip_depth:
@@ -114,6 +137,129 @@ def html_to_text(html: str) -> str:
     parser.feed(html or "")
     parser.close()
     return "\n".join(parser.parts)
+
+
+def _image_host_allowed(host: str, *, initial: bool) -> bool:
+    host = (host or "").lower().rstrip(".")
+    if initial:
+        return host == "graph.microsoft.com"
+    if host == "graph.microsoft.com":
+        return True
+    if host.endswith(".office.net") or host.endswith(".officeapps.live.com"):
+        return True
+    if host.endswith(".live.net"):
+        return True
+    return False
+
+
+def allowed_image_url(url: str) -> str | None:
+    """Allow only Graph OneNote resource URLs. Blocks SSRF to other hosts."""
+    raw = (url or "").strip()
+    if not raw or raw.lower().startswith(("cid:", "data:", "file:", "javascript:")):
+        return None
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    if raw.startswith("/"):
+        raw = "https://graph.microsoft.com" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not _image_host_allowed(host, initial=True):
+        return None
+    path = parsed.path.lower()
+    if "onenote" not in path and "/resources/" not in path:
+        return None
+    return parsed.geturl()
+
+
+def _sniff_image_format(data: bytes, content_type: str) -> str | None:
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    mapped = {
+        "image/png": "png",
+        "image/jpeg": "jpeg",
+        "image/jpg": "jpeg",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }.get(ctype)
+    if mapped:
+        return mapped
+    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
+        return "webp"
+    for magic, fmt in IMAGE_MAGIC:
+        if data.startswith(magic) and fmt != "webp":
+            return fmt
+    return None
+
+
+def _image_root() -> Path:
+    override = os.environ.get("ONENOTE_IMAGE_DIR")
+    if override:
+        return Path(override).resolve()
+    resolved = (WORKSPACE_ROOT / "onenote-pages").resolve()
+    if not resolved.is_relative_to(WORKSPACE_ROOT):
+        return WORKSPACE_ROOT / "onenote-pages"
+    return resolved
+
+
+def _safe_page_dir(page_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", page_id)[:120] or "page"
+
+
+def _hermes_path(path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(WORKSPACE_ROOT)
+    except ValueError:
+        return str(path)
+    return f"{HERMES_WORKSPACE}/{rel.as_posix()}"
+
+
+def _download_onenote_image(url: str, token: str) -> dict | None:
+    allowed = allowed_image_url(url)
+    if not allowed:
+        return None
+    headers = _headers(token)
+    try:
+        with _graph_client() as client:
+            with client.stream("GET", allowed, headers=headers, follow_redirects=True) as response:
+                final_host = urlparse(str(response.url)).hostname or ""
+                if not _image_host_allowed(final_host, initial=False):
+                    return None
+                if response.status_code >= 400:
+                    return None
+                buf = bytearray()
+                for chunk in response.iter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > MAX_IMAGE_BYTES:
+                        return None
+                data = bytes(buf)
+                fmt = _sniff_image_format(data, response.headers.get("content-type", ""))
+                if not fmt or not data:
+                    return None
+                return {"data": data, "format": fmt}
+    except httpx.HTTPError:
+        return None
+
+
+def _save_page_images(page_id: str, blobs: list[dict]) -> list[str]:
+    if not blobs:
+        return []
+    folder = _image_root() / _safe_page_dir(page_id)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)
+    except OSError:
+        return []
+    saved: list[str] = []
+    for index, blob in enumerate(blobs, start=1):
+        path = folder / f"{index:02d}.{blob['format']}"
+        try:
+            path.write_bytes(blob["data"])
+            os.chmod(path, 0o600)
+        except OSError:
+            continue
+        saved.append(_hermes_path(path))
+    return saved
 
 
 def _ensure_config_dir() -> None:
@@ -422,6 +568,7 @@ def read_onenote_page(page_id: str) -> dict:
     content = _graph_get(
         f"/me/onenote/pages/{encoded}/content",
         token["access_token"],
+        params={"includeIDs": "true"},
     )
     if not content.get("ok"):
         return content
@@ -432,6 +579,19 @@ def read_onenote_page(page_id: str) -> dict:
     parser = _HTMLText()
     parser.feed(html)
     parser.close()
+    blobs: list[dict] = []
+    seen: set[str] = set()
+    for raw_url in parser.image_urls:
+        if len(blobs) >= MAX_PAGE_IMAGES:
+            break
+        allowed = allowed_image_url(raw_url)
+        if not allowed or allowed in seen:
+            continue
+        seen.add(allowed)
+        fetched = _download_onenote_image(raw_url, token["access_token"])
+        if fetched:
+            blobs.append(fetched)
+    image_files = _save_page_images(checked, blobs)
     return {
         "ok": True,
         "id": checked,
@@ -440,7 +600,10 @@ def read_onenote_page(page_id: str) -> dict:
         "modified": info.get("lastModifiedDateTime"),
         "text": "\n".join(parser.parts),
         "image_count": parser.image_count,
+        "images_fetched": len(blobs),
+        "image_files": image_files,
         "html_truncated": len(content.get("html") or "") > MAX_PAGE_CHARS,
+        "_image_blobs": blobs,
     }
 
 

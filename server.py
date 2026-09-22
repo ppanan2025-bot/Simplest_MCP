@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.types import Image
 
 import knowledge_hub
 import onenote
@@ -235,13 +236,24 @@ def list_onenote_pages(section_id: str) -> dict:
 
 
 @mcp.tool()
-def read_onenote_page(page_id: str) -> dict:
-    """Read one OneNote page as plain text.
+def read_onenote_page(page_id: str):
+    """Read one OneNote page as text plus pictures for vision.
 
-    Use this when Hermes needs the contents of a note. HTML is converted to
-    text. Tokens, passwords, and raw auth headers are not returned.
+    Use this when Hermes needs the contents of a note, including handwriting
+    and screenshots. HTML text/alt is returned, and page images are returned
+    as vision images and saved under /workspace/onenote-pages/.
+    Tokens, passwords, and raw auth headers are not returned.
     """
-    return onenote.read_onenote_page(page_id)
+    result = onenote.read_onenote_page(page_id)
+    blobs = result.pop("_image_blobs", []) if isinstance(result, dict) else []
+    images = [
+        Image(data=blob["data"], format=blob["format"])
+        for blob in blobs
+        if isinstance(blob, dict) and blob.get("data") and blob.get("format")
+    ]
+    if not images:
+        return result
+    return [result, *images]
 
 
 @mcp.tool()

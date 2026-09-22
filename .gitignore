@@ -6,4 +6,4 @@ __pycache__/
 *.pyc
 .env
 onenote_token.bin
-onenote_device_flow.json
+.simplest-mcp/

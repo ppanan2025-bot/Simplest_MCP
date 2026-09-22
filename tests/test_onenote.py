@@ -124,7 +124,67 @@ class OneNoteTests(unittest.TestCase):
         self.assertEqual(result["title"], "Lecture")
         self.assertIn("Tiny Python", result["text"])
         self.assertEqual(result["image_count"], 0)
+        self.assertEqual(result.get("image_files"), [])
+        self.assertEqual(result.get("images_fetched"), 0)
+        self.assertEqual(result.get("_image_blobs"), [])
         self.assertNotIn("SECRET-TOKEN", str(result))
+
+    def test_graph_image_urls_only(self) -> None:
+        ok = onenote.allowed_image_url(
+            "https://graph.microsoft.com/v1.0/me/onenote/resources/0-abc/content"
+        )
+        self.assertIsNotNone(ok)
+        self.assertIsNone(onenote.allowed_image_url("http://169.254.169.254/latest/meta-data/"))
+        self.assertIsNone(onenote.allowed_image_url("https://evil.example/onenote/resources/x"))
+        self.assertIsNone(onenote.allowed_image_url("cid:foo"))
+        self.assertIsNone(onenote.allowed_image_url("../etc/passwd"))
+
+    def test_read_page_fetches_images_for_vision(self) -> None:
+        token = {"ok": True, "access_token": "SECRET-TOKEN"}
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+        )
+        html = (
+            '<html><body><img alt="handwriting note" '
+            'src="https://graph.microsoft.com/v1.0/me/onenote/resources/0-abc/content" />'
+            "</body></html>"
+        )
+
+        def fake_get(path, _token, params=None, extra_headers=None):
+            if path.endswith("/content"):
+                return {"ok": True, "html": html}
+            return {
+                "ok": True,
+                "data": {
+                    "id": "page1",
+                    "title": "String agg",
+                    "createdDateTime": "2026-01-01T00:00:00Z",
+                    "lastModifiedDateTime": "2026-01-01T00:00:00Z",
+                },
+            }
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"ONENOTE_IMAGE_DIR": tmp}, clear=False):
+                with mock.patch.object(onenote, "_with_token", return_value=token):
+                    with mock.patch.object(onenote, "_graph_get", side_effect=fake_get):
+                        with mock.patch.object(
+                            onenote,
+                            "_download_onenote_image",
+                            return_value={"data": png, "format": "png"},
+                        ):
+                            result = onenote.read_onenote_page("page1")
+            self.assertTrue(result["ok"])
+            self.assertIn("handwriting note", result["text"])
+            self.assertEqual(result["images_fetched"], 1)
+            self.assertEqual(len(result["image_files"]), 1)
+            self.assertEqual(len(result["_image_blobs"]), 1)
+            self.assertNotIn("SECRET-TOKEN", str(result["image_files"]))
+            saved = Path(tmp).joinpath("page1", "01.png")
+            self.assertTrue(saved.is_file())
+            self.assertEqual(saved.read_bytes(), png)
 
 
 if __name__ == "__main__":
