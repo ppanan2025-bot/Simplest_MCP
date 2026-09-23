@@ -1,4 +1,7 @@
-"""Stable IDs for unified sources, chunks, and images. No filesystem paths."""
+"""Stable IDs for unified sources, chunks, and images.
+
+These tokens come from unified tools. Do not treat them as filesystem paths.
+"""
 
 from __future__ import annotations
 
