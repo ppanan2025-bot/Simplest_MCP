@@ -8,6 +8,30 @@ import onenote
 
 
 class OneNoteTests(unittest.TestCase):
+    def test_split_and_render_inkml(self) -> None:
+        inkml = """<?xml version="1.0" encoding="utf-8"?>
+<inkml:ink xmlns:inkml="http://www.w3.org/2003/InkML">
+  <inkml:definitions>
+    <inkml:brush xml:id="br0">
+      <inkml:brushProperty name="color" value="#C00000"/>
+    </inkml:brush>
+  </inkml:definitions>
+  <inkml:trace brushRef="#br0">10 10, 20 12, 40 18, 80 40</inkml:trace>
+</inkml:ink>"""
+        body = (
+            "--bound\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+            "<html><body><!-- InkNode is not supported --><title>Tiny Python</title></body></html>\r\n"
+            "--bound\r\nContent-Type: application/inkml+xml\r\n\r\n"
+            f"{inkml}\r\n"
+            "--bound--"
+        )
+        html, ink = onenote.split_onenote_content(body, "multipart/mixed; boundary=bound")
+        self.assertIn("InkNode is not supported", html)
+        self.assertIn("inkml:trace", ink)
+        png = onenote.render_inkml_png(ink)
+        self.assertIsNotNone(png)
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
     def test_html_to_text(self) -> None:
         text = onenote.html_to_text("<html><body><h1>Week 1</h1><p>Stacks are LIFO.</p></body></html>")
         self.assertIn("Week 1", text)

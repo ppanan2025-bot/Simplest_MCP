@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import socket
 import time
+import xml.etree.ElementTree as ET
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -21,7 +23,9 @@ SCOPES = ["Notes.Read", "User.Read"]
 # Keep blocking path/shell characters such as / ; space | &.
 ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}!%-]{1,1024}$")
 MAX_PAGE_CHARS = 200_000
-HTTP_TIMEOUT_SECONDS = 10.0
+HTTP_TIMEOUT_SECONDS = 15.0
+MAX_INK_WIDTH = 1600
+MAX_INK_HEIGHT = 2200
 MAX_PAGE_IMAGES = 6
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
@@ -137,6 +141,157 @@ def html_to_text(html: str) -> str:
     parser.feed(html or "")
     parser.close()
     return "\n".join(parser.parts)
+
+
+def _local_name(tag: str) -> str:
+    return (tag or "").split("}")[-1].lower()
+
+
+def split_onenote_content(body: str, content_type: str = "") -> tuple[str, str]:
+    """Split Graph page content into HTML and InkML parts."""
+    text = body or ""
+    ctype = (content_type or "").lower()
+    html = text
+    inkml = ""
+    first_line = text.splitlines()[0].strip() if text else ""
+    if "multipart" in ctype or first_line.startswith("--"):
+        boundary = first_line if first_line.startswith("--") else ""
+        if boundary:
+            html_part = ""
+            ink_part = ""
+            for raw_part in text.split(boundary):
+                part = raw_part.strip().strip("-")
+                if not part:
+                    continue
+                header, sep, payload = part.partition("\r\n\r\n")
+                if not sep:
+                    header, sep, payload = part.partition("\n\n")
+                blob = payload or part
+                head = header.lower()
+                if "inkml" in head or "<?xml" in blob[:80]:
+                    ink_part = blob
+                elif "html" in head or "<html" in blob.lower():
+                    html_part = blob
+            html = html_part or html
+            inkml = ink_part
+    if not inkml and "<inkml:ink" in text:
+        start = text.find("<?xml")
+        if start < 0:
+            start = text.find("<inkml:ink")
+        end = text.rfind("</inkml:ink>")
+        if start >= 0 and end > start:
+            inkml = text[start : end + len("</inkml:ink>")]
+    return html, inkml
+
+
+def _parse_hex_color(value: str) -> tuple[int, int, int]:
+    raw = (value or "").strip()
+    if raw.startswith("#"):
+        digits = raw[1:]
+        if len(digits) == 8:
+            digits = digits[2:]
+        if len(digits) == 6:
+            return int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16)
+    return {
+        "red": (192, 0, 0),
+        "black": (32, 32, 32),
+        "blue": (31, 78, 121),
+        "green": (0, 128, 0),
+    }.get(raw.lower(), (32, 32, 32))
+
+
+def _trace_points(text: str, channels: int = 2) -> list[tuple[float, float]]:
+    nums = [float(item) for item in re.findall(r"-?\d+(?:\.\d+)?", text or "")]
+    if channels < 2:
+        channels = 2
+    points: list[tuple[float, float]] = []
+    for index in range(0, len(nums) - 1, channels):
+        points.append((nums[index], nums[index + 1]))
+    return points
+
+
+def render_inkml_png(inkml: str) -> bytes | None:
+    """Rasterize OneNote InkML strokes so Hermes can see handwriting."""
+    markup = (inkml or "").strip()
+    if not markup or "<ink" not in markup.lower():
+        return None
+    start = markup.find("<?xml")
+    if start < 0:
+        start = markup.lower().find("<ink")
+    end = markup.lower().rfind("</inkml:ink>")
+    if end < 0:
+        end = markup.lower().rfind("</ink>")
+    if start >= 0 and end > start:
+        close = markup.find(">", end)
+        markup = markup[start : close + 1 if close > end else end + 12]
+    try:
+        root = ET.fromstring(markup)
+    except ET.ParseError:
+        return None
+
+    brushes: dict[str, tuple[tuple[int, int, int], int]] = {}
+    for el in root.iter():
+        if _local_name(el.tag) != "brush":
+            continue
+        brush_id = el.get("{http://www.w3.org/XML/1998/namespace}id") or el.get("id") or ""
+        color = (32, 32, 32)
+        width = 3
+        for prop in el:
+            if _local_name(prop.tag) != "brushproperty":
+                continue
+            name = (prop.get("name") or "").lower()
+            value = prop.get("value") or ""
+            if name == "color":
+                color = _parse_hex_color(value)
+            elif name == "width":
+                try:
+                    width = max(2, min(12, int(float(value) / 80) or 3))
+                except ValueError:
+                    width = 3
+        if brush_id:
+            brushes[brush_id] = (color, width)
+            brushes[f"#{brush_id}"] = (color, width)
+
+    strokes: list[tuple[list[tuple[float, float]], tuple[int, int, int], int]] = []
+    for el in root.iter():
+        if _local_name(el.tag) != "trace":
+            continue
+        points = _trace_points(el.text or "")
+        if len(points) < 2:
+            continue
+        ref = el.get("brushRef") or ""
+        color, width = brushes.get(ref, ((32, 32, 32), 3))
+        strokes.append((points, color, width))
+    if not strokes:
+        return None
+
+    xs = [x for points, _, _ in strokes for x, _ in points]
+    ys = [y for points, _, _ in strokes for _, y in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 1.0)
+    span_y = max(max_y - min_y, 1.0)
+    pad = 24
+    scale = min((MAX_INK_WIDTH - 2 * pad) / span_x, (MAX_INK_HEIGHT - 2 * pad) / span_y)
+    width = max(64, min(MAX_INK_WIDTH, int(span_x * scale) + 2 * pad))
+    height = max(64, min(MAX_INK_HEIGHT, int(span_y * scale) + 2 * pad))
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for points, color, pen in strokes:
+        mapped = [
+            (int((x - min_x) * scale) + pad, int((y - min_y) * scale) + pad)
+            for x, y in points
+        ]
+        draw.line(mapped, fill=color, width=pen, joint="curve")
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
 
 
 def _image_host_allowed(host: str, *, initial: bool) -> bool:
@@ -454,8 +609,13 @@ def _graph_get(path: str, token: str, params: dict | None = None, extra_headers:
     if response.status_code >= 400:
         return _error("GRAPH_ERROR", f"Microsoft Graph returned HTTP {response.status_code}")
     content_type = response.headers.get("content-type", "")
-    if "text/html" in content_type or path.endswith("/content"):
-        return {"ok": True, "html": response.text}
+    if (
+        "text/html" in content_type
+        or "multipart/" in content_type
+        or "inkml" in content_type
+        or path.endswith("/content")
+    ):
+        return {"ok": True, "html": response.text, "content_type": content_type}
     try:
         return {"ok": True, "data": response.json()}
     except json.JSONDecodeError:
@@ -568,11 +728,11 @@ def read_onenote_page(page_id: str) -> dict:
     content = _graph_get(
         f"/me/onenote/pages/{encoded}/content",
         token["access_token"],
-        params={"includeIDs": "true"},
+        params={"includeIDs": "true", "includeInkML": "true"},
     )
     if not content.get("ok"):
         return content
-    html = content.get("html") or ""
+    html, inkml = split_onenote_content(content.get("html") or "", content.get("content_type") or "")
     if len(html) > MAX_PAGE_CHARS:
         html = html[:MAX_PAGE_CHARS]
     info = (meta.get("data") or {}) if isinstance(meta.get("data"), dict) else {}
@@ -581,6 +741,9 @@ def read_onenote_page(page_id: str) -> dict:
     parser.close()
     blobs: list[dict] = []
     seen: set[str] = set()
+    ink_png = render_inkml_png(inkml)
+    if ink_png:
+        blobs.append({"data": ink_png, "format": "png"})
     for raw_url in parser.image_urls:
         if len(blobs) >= MAX_PAGE_IMAGES:
             break
@@ -592,15 +755,19 @@ def read_onenote_page(page_id: str) -> dict:
         if fetched:
             blobs.append(fetched)
     image_files = _save_page_images(checked, blobs)
+    text_parts = list(parser.parts)
+    if ink_png and not any(part for part in text_parts if part and part != (info.get("title") or "")):
+        text_parts.append("This page has handwritten ink. See the rendered page image.")
     return {
         "ok": True,
         "id": checked,
         "title": info.get("title"),
         "created": info.get("createdDateTime"),
         "modified": info.get("lastModifiedDateTime"),
-        "text": "\n".join(parser.parts),
-        "image_count": parser.image_count,
+        "text": "\n".join(text_parts),
+        "image_count": parser.image_count + (1 if ink_png else 0),
         "images_fetched": len(blobs),
+        "has_ink": bool(ink_png),
         "image_files": image_files,
         "html_truncated": len(content.get("html") or "") > MAX_PAGE_CHARS,
         "_image_blobs": blobs,
