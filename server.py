@@ -16,6 +16,8 @@ import knowledge_hub
 import onenote
 from monitoring import docker as docker_tools
 from monitoring import system as system_tools
+from unified import ingest as unified_ingest
+from unified import search as unified_layer
 
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
 SERVER_DIR = Path(__file__).resolve().parent
@@ -264,6 +266,61 @@ def search_onenote(query: str) -> dict:
     characters. Read-only.
     """
     return onenote.search_onenote(query)
+
+
+@mcp.tool()
+def unified_search(query: str, limit: int = 10, source_type: str = "") -> dict:
+    """Search Knowledge Hub PDFs and indexed OneNote with one query.
+
+    Use this first for questions like BCNF, PDA, or normalization. It searches
+    PDF text, OneNote typed text, handwriting transcriptions, and image
+    descriptions. source_type may be pdf, onenote, or empty for both.
+    Returns ids only — then read_chunk or get_source_image. No host paths.
+    """
+    return unified_layer.unified_search(query, limit=limit, source_type=source_type or None)
+
+
+@mcp.tool()
+def get_source(source_id: str) -> dict:
+    """Return metadata for one unified source (pdf:... or onenote:...)."""
+    return unified_layer.get_source(source_id)
+
+
+@mcp.tool()
+def read_chunk(chunk_id: str) -> dict:
+    """Read one searchable chunk by id. Does not return a whole document."""
+    return unified_layer.read_chunk(chunk_id)
+
+
+@mcp.tool()
+def get_surrounding_context(chunk_id: str) -> dict:
+    """Return nearby chunks for the same source as chunk_id."""
+    return unified_layer.get_surrounding_context(chunk_id)
+
+
+@mcp.tool()
+def get_source_image(image_id: str):
+    """Return one indexed OneNote image for Hermes vision. image_id only."""
+    result = unified_layer.get_source_image(image_id)
+    data = result.pop("data", None) if isinstance(result, dict) else None
+    if not data:
+        return result
+    return [result, Image(data=data, format=result.get("format") or "png")]
+
+
+@mcp.tool()
+def get_recent_sources(limit: int = 10) -> dict:
+    """List recently updated PDF documents and indexed OneNote pages."""
+    return unified_layer.get_recent_sources(limit)
+
+
+@mcp.tool()
+def refresh_unified_index(max_pages: int = 80) -> dict:
+    """Refresh the OneNote side of the unified index. Skips unchanged pages.
+
+    Does not rewrite Knowledge Hub PDFs. Those stay in knowledge.db.
+    """
+    return unified_ingest.refresh_unified_index(max_pages=max_pages)
 
 
 if __name__ == "__main__":

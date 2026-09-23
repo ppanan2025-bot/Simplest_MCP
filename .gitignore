@@ -7,3 +7,5 @@ __pycache__/
 .env
 onenote_token.bin
 .simplest-mcp/
+unified.db
+onenote-pages/

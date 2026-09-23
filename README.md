@@ -42,6 +42,14 @@ OneNote (Microsoft Graph, read-only):
 
 Requires `ONENOTE_CLIENT_ID` on the MCP process (Entra public client with `Notes.Read`). Tokens are stored under `~/.config/simplest-mcp/` and are gitignored.
 
+Unified knowledge (PDFs from existing `knowledge.db` + OneNote index):
+
+- `unified_search(query, limit=10, source_type="")` — one search over PDF text and OneNote.
+- `get_source(source_id)` / `read_chunk(chunk_id)` / `get_surrounding_context(chunk_id)`
+- `get_source_image(image_id)` — original OneNote image for vision.
+- `get_recent_sources(limit=10)`
+- `refresh_unified_index(max_pages=80)` — reindex OneNote; skips unchanged pages.
+
 The hub helpers live in `knowledge_hub.py`. The reusable framework is documented in the `knowledge_MCP` repo. Hermes usage notes live in `knowledge_hub_skill`.
 
 ## Requirements
