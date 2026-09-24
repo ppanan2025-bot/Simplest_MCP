@@ -24,8 +24,33 @@ from unified import search as unified_layer
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
 SERVER_DIR = Path(__file__).resolve().parent
 
-# Stay in the server directory so FastMCP never reads another user's .env.
+
+def _load_dotenv(path: Path) -> None:
+    """Copy KEY=VALUE lines from .env into os.environ if the key is unset.
+
+    FastMCP only applies FASTMCP_* from .env. Canvas and OneNote keys must
+    be loaded here. Existing process env wins. Never logs values.
+    """
+    if not path.is_file():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+# Stay in the server directory so we never read another user's .env.
 os.chdir(SERVER_DIR)
+_load_dotenv(SERVER_DIR / ".env")
 
 mcp = FastMCP("simplest-mcp")
 

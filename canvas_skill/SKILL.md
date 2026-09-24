@@ -1,10 +1,9 @@
 ---
 name: canvas-mcp
 description: >
-  Check the user's unfinished Canvas assignments and submission status
-  through simplest-mcp tools only. Use when they ask what is due, what
-  they have not submitted, or whether a specific assignment was handed in.
-  Do not open a browser, and do not use the terminal or curl against Canvas.
+  Check Sydney Uni Canvas assignment and submission status via MCP only.
+  Use for any Canvas / assignment / due / submitted / unfinished question.
+  Never use browser, Chrome, browser_exec, or screenshots for Canvas.
 version: 0.1.0
 author: AnPan (ppanan2025-bot)
 license: MIT
