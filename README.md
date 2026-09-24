@@ -42,6 +42,13 @@ OneNote (Microsoft Graph, read-only):
 
 Requires `ONENOTE_CLIENT_ID` on the MCP process (Entra public client with `Notes.Read`). Tokens are stored under `~/.config/simplest-mcp/` and are gitignored.
 
+Canvas (LMS, read-only, authenticated student submission):
+
+- `get_incomplete_canvas_assignments(include_overdue=True, include_future=True, days_ahead=None)` — unfinished work across current courses, using the signed-in user's submission, not due dates alone.
+- `get_canvas_assignment_status(course_id, assignment_id)` — one assignment's submit/grade/excused/missing state.
+
+Requires `CANVAS_BASE_URL` and `CANVAS_ACCESS_TOKEN` (personal access token) on the MCP process. GET only; the token is never returned. Do not commit it.
+
 Unified knowledge (PDFs from existing `knowledge.db` + OneNote index):
 
 - `unified_search(query, limit=10, source_type="")` — one search over PDF text and OneNote.

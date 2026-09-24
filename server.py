@@ -1,7 +1,8 @@
 """Read-only MCP server for a Hermes host.
 
-Exposes host status, Docker inspection, a jailed workspace listing, and a
-jailed knowledge-hub reader. Does not run shell commands and does not require sudo.
+Exposes host status, Docker inspection, a jailed workspace listing, a
+jailed knowledge-hub reader, and Canvas assignment status. Does not run
+shell commands and does not require sudo.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 
+import canvas
 import knowledge_hub
 import onenote
 from monitoring import docker as docker_tools
@@ -312,6 +314,42 @@ def get_source_image(image_id: str):
 def get_recent_sources(limit: int = 10) -> dict:
     """List recently updated PDF documents and indexed OneNote pages."""
     return unified_layer.get_recent_sources(limit)
+
+
+@mcp.tool()
+def get_incomplete_canvas_assignments(
+    include_overdue: bool = True,
+    include_future: bool = True,
+    days_ahead: int | None = None,
+) -> dict:
+    """List Canvas assignments the signed-in student has not finished yet.
+
+    Use this when the user asks which assignments are unfinished, overdue, or
+    due this week. It reads the authenticated user's submission for each
+    published assignment in current student courses. Completed means Canvas
+    marks the work submitted, graded, pending review, or excused. Missing a
+    grade after a submit is not unfinished. Assignments with submission type
+    none are skipped. External-tool items are included only when Canvas marks
+    them missing or when they are New Quizzes with no submit. Read-only.
+    """
+    return canvas.get_incomplete_canvas_assignments(
+        include_overdue=include_overdue,
+        include_future=include_future,
+        days_ahead=days_ahead,
+    )
+
+
+@mcp.tool()
+def get_canvas_assignment_status(course_id: str, assignment_id: str) -> dict:
+    """Return my Canvas submission status for one assignment.
+
+    Use this after identifying a course and assignment, for questions like
+    whether a COMP2022 assignment was submitted. Uses include[]=submission
+    for the authenticated user. Distinguishes unsubmitted, submitted but not
+    graded, graded, excused, and missing. Does not infer completion from the
+    due date alone. Read-only; never submits.
+    """
+    return canvas.get_canvas_assignment_status(course_id, assignment_id)
 
 
 @mcp.tool()
