@@ -63,6 +63,22 @@ class OneNoteTests(unittest.TestCase):
         self.assertIsNotNone(png)
         self.assertTrue(png.startswith(b"\x89PNG"))
 
+    def test_tile_ink_png_splits_tall_pages(self) -> None:
+        from PIL import Image
+
+        tall = Image.new("RGB", (400, 3000), (255, 255, 255))
+        buf = __import__("io").BytesIO()
+        tall.save(buf, format="PNG")
+        tiles = onenote.tile_ink_png(buf.getvalue())
+        self.assertGreater(len(tiles), 1)
+        self.assertLessEqual(len(tiles), onenote.MAX_INK_TILES)
+        for tile in tiles:
+            self.assertTrue(tile.startswith(b"\x89PNG"))
+        short = Image.new("RGB", (400, 200), (255, 255, 255))
+        small = __import__("io").BytesIO()
+        short.save(small, format="PNG")
+        self.assertEqual(len(onenote.tile_ink_png(small.getvalue())), 1)
+
     def test_html_to_text(self) -> None:
         text = onenote.html_to_text("<html><body><h1>Week 1</h1><p>Stacks are LIFO.</p></body></html>")
         self.assertIn("Week 1", text)

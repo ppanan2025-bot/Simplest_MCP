@@ -26,6 +26,9 @@ MAX_PAGE_CHARS = 200_000
 HTTP_TIMEOUT_SECONDS = 15.0
 MAX_INK_WIDTH = 2000
 MAX_INK_HEIGHT = 4000
+INK_TILE_HEIGHT = 1400
+INK_TILE_OVERLAP = 160
+MAX_INK_TILES = 5
 MAX_PAGE_IMAGES = 6
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
@@ -321,6 +324,38 @@ def render_inkml_png(inkml: str) -> bytes | None:
     out = io.BytesIO()
     image.save(out, format="PNG")
     return out.getvalue()
+
+
+def tile_ink_png(png: bytes) -> list[bytes]:
+    """Split a tall ink page so vision can read it without timing out."""
+    if not png:
+        return []
+    try:
+        from PIL import Image
+    except ImportError:
+        return [png]
+    try:
+        image = Image.open(io.BytesIO(png)).convert("RGB")
+    except Exception:
+        return [png]
+    width, height = image.size
+    if height <= INK_TILE_HEIGHT + 80:
+        return [png]
+    tiles: list[bytes] = []
+    step = max(200, INK_TILE_HEIGHT - INK_TILE_OVERLAP)
+    top = 0
+    while top < height and len(tiles) < MAX_INK_TILES:
+        remaining = height - top
+        if remaining <= INK_TILE_HEIGHT + 40 or len(tiles) == MAX_INK_TILES - 1:
+            crop = image.crop((0, top, width, height))
+            top = height
+        else:
+            crop = image.crop((0, top, width, top + INK_TILE_HEIGHT))
+            top += step
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        tiles.append(buf.getvalue())
+    return tiles
 
 
 def _image_host_allowed(host: str, *, initial: bool) -> bool:
@@ -771,8 +806,11 @@ def read_onenote_page(page_id: str) -> dict:
     blobs: list[dict] = []
     seen: set[str] = set()
     ink_png = render_inkml_png(inkml)
-    if ink_png:
-        blobs.append({"data": ink_png, "format": "png"})
+    ink_tiles = tile_ink_png(ink_png) if ink_png else []
+    for tile in ink_tiles:
+        if len(blobs) >= MAX_PAGE_IMAGES:
+            break
+        blobs.append({"data": tile, "format": "png"})
     for raw_url in parser.image_urls:
         if len(blobs) >= MAX_PAGE_IMAGES:
             break
@@ -785,8 +823,11 @@ def read_onenote_page(page_id: str) -> dict:
             blobs.append(fetched)
     image_files = _save_page_images(checked, blobs)
     text_parts = list(parser.parts)
-    if ink_png and not any(part for part in text_parts if part and part != (info.get("title") or "")):
-        text_parts.append("This page has handwritten ink. See the rendered page image.")
+    if ink_tiles and not any(part for part in text_parts if part and part != (info.get("title") or "")):
+        text_parts.append(
+            f"This page has handwritten ink in {len(ink_tiles)} image tile(s), top to bottom. "
+            "Read each tile; do not send the whole page to a separate vision timeout."
+        )
     return {
         "ok": True,
         "id": checked,
@@ -794,9 +835,10 @@ def read_onenote_page(page_id: str) -> dict:
         "created": info.get("createdDateTime"),
         "modified": info.get("lastModifiedDateTime"),
         "text": "\n".join(text_parts),
-        "image_count": parser.image_count + (1 if ink_png else 0),
+        "image_count": parser.image_count + len(ink_tiles),
         "images_fetched": len(blobs),
-        "has_ink": bool(ink_png),
+        "has_ink": bool(ink_tiles),
+        "ink_tiles": len(ink_tiles),
         "image_files": image_files,
         "html_truncated": len(content.get("html") or "") > MAX_PAGE_CHARS,
         "_image_blobs": blobs,
