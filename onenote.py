@@ -29,6 +29,9 @@ MAX_INK_HEIGHT = 4000
 INK_TILE_HEIGHT = 1400
 INK_TILE_OVERLAP = 160
 MAX_INK_TILES = 5
+MIN_INK_PEN = 3
+MAX_INK_PEN = 10
+INK_PEN_BOOST = 2.5
 MAX_PAGE_IMAGES = 6
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
@@ -197,10 +200,10 @@ def _parse_hex_color(value: str) -> tuple[int, int, int]:
             return int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16)
     return {
         "red": (192, 0, 0),
-        "black": (32, 32, 32),
+        "black": (0, 0, 0),
         "blue": (31, 78, 121),
         "green": (0, 128, 0),
-    }.get(raw.lower(), (32, 32, 32))
+    }.get(raw.lower(), (0, 0, 0))
 
 
 def _trace_points(
@@ -240,6 +243,54 @@ def _ink_channel_layout(root: ET.Element) -> tuple[int, int, int]:
     return max(len(names), 2), x_index, y_index
 
 
+def _ink_pressure_index(root: ET.Element) -> int | None:
+    names = [
+        (el.get("name") or "").strip().upper()
+        for el in root.iter()
+        if _local_name(el.tag) == "channel" and el.get("name")
+    ]
+    return names.index("F") if "F" in names else None
+
+
+def _trace_samples(
+    text: str,
+    channels: int = 2,
+    x_index: int = 0,
+    y_index: int = 1,
+    f_index: int | None = None,
+) -> list[tuple[float, float, float | None]]:
+    nums = [float(item) for item in re.findall(r"-?\d+(?:\.\d+)?", text or "")]
+    if channels < 2:
+        channels = 2
+    needed = max(x_index, y_index, f_index if f_index is not None else 0)
+    samples: list[tuple[float, float, float | None]] = []
+    for index in range(0, len(nums) - needed, channels):
+        pressure = nums[index + f_index] if f_index is not None else None
+        samples.append((nums[index + x_index], nums[index + y_index], pressure))
+    return samples
+
+
+def _stroke_pen(himetric_width: float, scale: float, pressure: float | None = None) -> int:
+    base = max(1.0, himetric_width * scale * INK_PEN_BOOST)
+    pen = max(MIN_INK_PEN, min(MAX_INK_PEN, int(round(base))))
+    if pressure is not None and pressure > 0:
+        factor = 0.7 + 0.6 * min(1.0, pressure / 16000.0)
+        pen = max(MIN_INK_PEN, min(MAX_INK_PEN, int(round(pen * factor))))
+    return pen
+
+
+def _ink_draw_color(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    red, green, blue = color
+    if red < 60 and green < 60 and blue < 60:
+        return (0, 0, 0)
+    return color
+
+
+def _draw_ink_dot(draw, x: int, y: int, pen: int, color: tuple[int, int, int]) -> None:
+    radius = max(2, pen // 2)
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+
+
 def render_inkml_png(inkml: str) -> bytes | None:
     """Rasterize OneNote InkML strokes so Hermes can see handwriting."""
     markup = (inkml or "").strip()
@@ -260,12 +311,13 @@ def render_inkml_png(inkml: str) -> bytes | None:
         return None
 
     channels, x_index, y_index = _ink_channel_layout(root)
-    brushes: dict[str, tuple[tuple[int, int, int], int]] = {}
+    f_index = _ink_pressure_index(root)
+    brushes: dict[str, tuple[tuple[int, int, int], float]] = {}
     for el in root.iter():
         if _local_name(el.tag) != "brush":
             continue
         brush_id = el.get("{http://www.w3.org/XML/1998/namespace}id") or el.get("id") or ""
-        color = (32, 32, 32)
+        color = (0, 0, 0)
         himetric_width = 50.0
         for prop in el:
             if _local_name(prop.tag) != "brushproperty":
@@ -283,21 +335,27 @@ def render_inkml_png(inkml: str) -> bytes | None:
             brushes[brush_id] = (color, himetric_width)
             brushes[f"#{brush_id}"] = (color, himetric_width)
 
-    strokes: list[tuple[list[tuple[float, float]], tuple[int, int, int], float]] = []
+    strokes: list[tuple[list[tuple[float, float, float | None]], tuple[int, int, int], float]] = []
     for el in root.iter():
         if _local_name(el.tag) != "trace":
             continue
-        points = _trace_points(el.text or "", channels=channels, x_index=x_index, y_index=y_index)
-        if len(points) < 2:
+        samples = _trace_samples(
+            el.text or "",
+            channels=channels,
+            x_index=x_index,
+            y_index=y_index,
+            f_index=f_index,
+        )
+        if not samples:
             continue
         ref = el.get("brushRef") or ""
-        color, himetric_width = brushes.get(ref, ((32, 32, 32), 50.0))
-        strokes.append((points, color, himetric_width))
+        color, himetric_width = brushes.get(ref, ((0, 0, 0), 50.0))
+        strokes.append((samples, _ink_draw_color(color), himetric_width))
     if not strokes:
         return None
 
-    xs = [x for points, _, _ in strokes for x, _ in points]
-    ys = [y for points, _, _ in strokes for _, y in points]
+    xs = [x for samples, _, _ in strokes for x, _, _ in samples]
+    ys = [y for samples, _, _ in strokes for _, y, _ in samples]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
     span_x = max(max_x - min_x, 1.0)
@@ -308,19 +366,31 @@ def render_inkml_png(inkml: str) -> bytes | None:
     height = max(64, min(MAX_INK_HEIGHT, int(span_y * scale) + 2 * pad))
 
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageEnhance
     except ImportError:
         return None
 
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    for points, color, himetric_width in strokes:
+    for samples, color, himetric_width in strokes:
         mapped = [
-            (int((x - min_x) * scale) + pad, int((y - min_y) * scale) + pad)
-            for x, y in points
+            (
+                int((x - min_x) * scale) + pad,
+                int((y - min_y) * scale) + pad,
+                pressure,
+            )
+            for x, y, pressure in samples
         ]
-        pen = max(2, min(8, int(round(himetric_width * scale)) or 2))
-        draw.line(mapped, fill=color, width=pen, joint="curve")
+        if len(mapped) == 1:
+            x, y, pressure = mapped[0]
+            _draw_ink_dot(draw, x, y, _stroke_pen(himetric_width, scale, pressure), color)
+            continue
+        pressures = [pressure for _, _, pressure in mapped if pressure is not None]
+        pressure = (sum(pressures) / len(pressures)) if pressures else None
+        pen = _stroke_pen(himetric_width, scale, pressure)
+        draw.line([(x, y) for x, y, _ in mapped], fill=color, width=pen, joint="curve")
+    image = ImageEnhance.Contrast(image).enhance(1.8)
+    image = ImageEnhance.Sharpness(image).enhance(1.3)
     out = io.BytesIO()
     image.save(out, format="PNG")
     return out.getvalue()
@@ -346,7 +416,12 @@ def tile_ink_png(png: bytes) -> list[bytes]:
     top = 0
     while top < height and len(tiles) < MAX_INK_TILES:
         remaining = height - top
-        if remaining <= INK_TILE_HEIGHT + 40 or len(tiles) == MAX_INK_TILES - 1:
+        leftover_after = remaining - INK_TILE_HEIGHT
+        if (
+            remaining <= INK_TILE_HEIGHT + INK_TILE_OVERLAP
+            or leftover_after <= INK_TILE_OVERLAP
+            or len(tiles) == MAX_INK_TILES - 1
+        ):
             crop = image.crop((0, top, width, height))
             top = height
         else:
@@ -470,6 +545,7 @@ def _save_page_images(page_id: str, blobs: list[dict]) -> list[str]:
     except OSError:
         return []
     saved: list[str] = []
+    written: set[str] = set()
     for index, blob in enumerate(blobs, start=1):
         path = folder / f"{index:02d}.{blob['format']}"
         try:
@@ -477,7 +553,16 @@ def _save_page_images(page_id: str, blobs: list[dict]) -> list[str]:
             os.chmod(path, 0o600)
         except OSError:
             continue
+        written.add(path.name)
         saved.append(_hermes_path(path))
+    for old in folder.iterdir():
+        if old.name in written:
+            continue
+        if old.stem.isdigit() and len(old.stem) == 2 and old.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            try:
+                old.unlink()
+            except OSError:
+                pass
     return saved
 
 
@@ -826,7 +911,8 @@ def read_onenote_page(page_id: str) -> dict:
     if ink_tiles and not any(part for part in text_parts if part and part != (info.get("title") or "")):
         text_parts.append(
             f"This page has handwritten ink in {len(ink_tiles)} image tile(s), top to bottom. "
-            "Read each tile; do not send the whole page to a separate vision timeout."
+            "The tiles are already attached to this tool result. Read them here. "
+            "Do not call vision_analyze, tesseract, or cron."
         )
     return {
         "ok": True,

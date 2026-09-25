@@ -62,6 +62,21 @@ class OneNoteTests(unittest.TestCase):
         png = onenote.render_inkml_png(inkml)
         self.assertIsNotNone(png)
         self.assertTrue(png.startswith(b"\x89PNG"))
+        from PIL import Image
+        import io
+
+        image = Image.open(io.BytesIO(png)).convert("L")
+        dark = sum(1 for pixel in image.getdata() if pixel < 20)
+        self.assertGreater(dark, 20)
+
+    def test_single_point_trace_is_drawn(self) -> None:
+        inkml = """<?xml version="1.0" encoding="utf-8"?>
+<inkml:ink xmlns:inkml="http://www.w3.org/2003/InkML">
+  <inkml:trace>40 40</inkml:trace>
+</inkml:ink>"""
+        png = onenote.render_inkml_png(inkml)
+        self.assertIsNotNone(png)
+        self.assertTrue(png.startswith(b"\x89PNG"))
 
     def test_tile_ink_png_splits_tall_pages(self) -> None:
         from PIL import Image

@@ -266,11 +266,12 @@ def list_onenote_pages(section_id: str) -> dict:
 
 @mcp.tool()
 def read_onenote_page(page_id: str):
-    """Read one OneNote page as text plus pictures for vision.
+    """Read one OneNote page as text plus attached images.
 
     Use this when Hermes needs the contents of a note, including handwriting
-    and screenshots. HTML text/alt is returned, and page images are returned
-    as vision images and saved under /workspace/onenote-pages/.
+    and screenshots. HTML text/alt is returned, and page images (ink tiles
+    top to bottom) are attached to this result. Read those attached images.
+    Do not call vision_analyze, tesseract, or schedule a cron retry.
     Tokens, passwords, and raw auth headers are not returned.
     """
     result = onenote.read_onenote_page(page_id)
