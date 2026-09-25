@@ -32,6 +32,37 @@ class OneNoteTests(unittest.TestCase):
         self.assertIsNotNone(png)
         self.assertTrue(png.startswith(b"\x89PNG"))
 
+    def test_pressure_channel_is_not_used_as_xy(self) -> None:
+        inkml = """<?xml version="1.0" encoding="utf-8"?>
+<inkml:ink xmlns:inkml="http://www.w3.org/2003/InkML">
+  <inkml:definitions>
+    <inkml:context xml:id="ctxCoordinatesWithPressure">
+      <inkml:inkSource xml:id="inkSrc">
+        <inkml:traceFormat>
+          <inkml:channel name="X" type="integer"/>
+          <inkml:channel name="Y" type="integer"/>
+          <inkml:channel name="F" type="integer"/>
+        </inkml:traceFormat>
+      </inkml:inkSource>
+    </inkml:context>
+  </inkml:definitions>
+  <inkml:trace contextRef="#ctxCoordinatesWithPressure">10 20 9000, 40 20 12000, 80 20 8000</inkml:trace>
+</inkml:ink>"""
+        count, x_index, y_index = onenote._ink_channel_layout(
+            __import__("xml.etree.ElementTree", fromlist=["ET"]).fromstring(inkml)
+        )
+        self.assertEqual((count, x_index, y_index), (3, 0, 1))
+        points = onenote._trace_points(
+            "10 20 9000, 40 20 12000, 80 20 8000",
+            channels=count,
+            x_index=x_index,
+            y_index=y_index,
+        )
+        self.assertEqual(points, [(10.0, 20.0), (40.0, 20.0), (80.0, 20.0)])
+        png = onenote.render_inkml_png(inkml)
+        self.assertIsNotNone(png)
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
     def test_html_to_text(self) -> None:
         text = onenote.html_to_text("<html><body><h1>Week 1</h1><p>Stacks are LIFO.</p></body></html>")
         self.assertIn("Week 1", text)

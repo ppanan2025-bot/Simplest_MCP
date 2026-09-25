@@ -24,8 +24,8 @@ SCOPES = ["Notes.Read", "User.Read"]
 ID_RE = re.compile(r"^[A-Za-z0-9_=.:{}!%-]{1,1024}$")
 MAX_PAGE_CHARS = 200_000
 HTTP_TIMEOUT_SECONDS = 15.0
-MAX_INK_WIDTH = 1600
-MAX_INK_HEIGHT = 2200
+MAX_INK_WIDTH = 2000
+MAX_INK_HEIGHT = 4000
 MAX_PAGE_IMAGES = 6
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 WORKSPACE_ROOT = Path("/home/hermes/workspace").resolve()
@@ -200,14 +200,41 @@ def _parse_hex_color(value: str) -> tuple[int, int, int]:
     }.get(raw.lower(), (32, 32, 32))
 
 
-def _trace_points(text: str, channels: int = 2) -> list[tuple[float, float]]:
+def _trace_points(
+    text: str,
+    channels: int = 2,
+    x_index: int = 0,
+    y_index: int = 1,
+) -> list[tuple[float, float]]:
     nums = [float(item) for item in re.findall(r"-?\d+(?:\.\d+)?", text or "")]
     if channels < 2:
         channels = 2
+    if x_index < 0 or y_index < 0 or x_index >= channels or y_index >= channels:
+        x_index, y_index = 0, 1
     points: list[tuple[float, float]] = []
-    for index in range(0, len(nums) - 1, channels):
-        points.append((nums[index], nums[index + 1]))
+    for index in range(0, len(nums) - y_index, channels):
+        points.append((nums[index + x_index], nums[index + y_index]))
     return points
+
+
+def _ink_channel_layout(root: ET.Element) -> tuple[int, int, int]:
+    """Return (channel_count, x_index, y_index) from InkML traceFormat.
+
+    OneNote handwriting uses X,Y,F (pressure). Treating F as a coordinate
+    fills the page with a dark scribble.
+    """
+    names: list[str] = []
+    for el in root.iter():
+        if _local_name(el.tag) != "channel":
+            continue
+        name = (el.get("name") or "").strip().upper()
+        if name:
+            names.append(name)
+    if not names:
+        return 2, 0, 1
+    x_index = names.index("X") if "X" in names else 0
+    y_index = names.index("Y") if "Y" in names else 1
+    return max(len(names), 2), x_index, y_index
 
 
 def render_inkml_png(inkml: str) -> bytes | None:
@@ -229,13 +256,14 @@ def render_inkml_png(inkml: str) -> bytes | None:
     except ET.ParseError:
         return None
 
+    channels, x_index, y_index = _ink_channel_layout(root)
     brushes: dict[str, tuple[tuple[int, int, int], int]] = {}
     for el in root.iter():
         if _local_name(el.tag) != "brush":
             continue
         brush_id = el.get("{http://www.w3.org/XML/1998/namespace}id") or el.get("id") or ""
         color = (32, 32, 32)
-        width = 3
+        himetric_width = 50.0
         for prop in el:
             if _local_name(prop.tag) != "brushproperty":
                 continue
@@ -245,23 +273,23 @@ def render_inkml_png(inkml: str) -> bytes | None:
                 color = _parse_hex_color(value)
             elif name == "width":
                 try:
-                    width = max(2, min(12, int(float(value) / 80) or 3))
+                    himetric_width = max(10.0, float(value))
                 except ValueError:
-                    width = 3
+                    himetric_width = 50.0
         if brush_id:
-            brushes[brush_id] = (color, width)
-            brushes[f"#{brush_id}"] = (color, width)
+            brushes[brush_id] = (color, himetric_width)
+            brushes[f"#{brush_id}"] = (color, himetric_width)
 
-    strokes: list[tuple[list[tuple[float, float]], tuple[int, int, int], int]] = []
+    strokes: list[tuple[list[tuple[float, float]], tuple[int, int, int], float]] = []
     for el in root.iter():
         if _local_name(el.tag) != "trace":
             continue
-        points = _trace_points(el.text or "")
+        points = _trace_points(el.text or "", channels=channels, x_index=x_index, y_index=y_index)
         if len(points) < 2:
             continue
         ref = el.get("brushRef") or ""
-        color, width = brushes.get(ref, ((32, 32, 32), 3))
-        strokes.append((points, color, width))
+        color, himetric_width = brushes.get(ref, ((32, 32, 32), 50.0))
+        strokes.append((points, color, himetric_width))
     if not strokes:
         return None
 
@@ -283,11 +311,12 @@ def render_inkml_png(inkml: str) -> bytes | None:
 
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    for points, color, pen in strokes:
+    for points, color, himetric_width in strokes:
         mapped = [
             (int((x - min_x) * scale) + pad, int((y - min_y) * scale) + pad)
             for x, y in points
         ]
+        pen = max(2, min(8, int(round(himetric_width * scale)) or 2))
         draw.line(mapped, fill=color, width=pen, joint="curve")
     out = io.BytesIO()
     image.save(out, format="PNG")
